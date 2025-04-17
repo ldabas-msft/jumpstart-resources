@@ -65,16 +65,16 @@ do {
 # (B) (Optional) Sign in to Azure if needed
 # Uncomment if you want to connect automatically:
 ###############################################################################
-Write-Host "Authenticating to Azure..."
-$spnpassword = ConvertTo-SecureString $env:spnClientSecret -AsPlainText -Force
-$spncredential = New-Object System.Management.Automation.PSCredential ($env:spnClientId, $spnpassword)
-try {
-    $null = Connect-AzAccount -ServicePrincipal -Credential $spncredential -Tenant $env:spnTenantId -Subscription $env:subscriptionId -Scope Process
-    Write-Host "Successfully authenticated to Azure"
-} catch {
-    Write-Error "Failed to authenticate to Azure: $_"
-    throw
-}
+#Write-Host "Authenticating to Azure..."
+#$spnpassword = ConvertTo-SecureString $env:spnClientSecret -AsPlainText -Force
+#$spncredential = New-Object System.Management.Automation.PSCredential ($env:spnClientId, $spnpassword)
+#try {
+#    $null = Connect-AzAccount -ServicePrincipal -Credential $spncredential -Tenant $env:spnTenantId -Subscription $env:subscriptionId -Scope Process
+#    Write-Host "Successfully authenticated to Azure"
+#} catch {
+#    Write-Error "Failed to authenticate to Azure: $_"
+#    throw
+#}
 ###############################################################################
 # (C) Run Pester Tests
 ###############################################################################
