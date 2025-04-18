@@ -102,7 +102,6 @@ $config.Output.CIFormat = "AzureDevops"
 $config.Run.Path  = "$Env:HCIBoxTestsDir\hci.tests.ps1"
 Invoke-Pester -Configuration $config
 
-
 ###############################################################################
 # (D) Connect to Azure, create a container, and upload the Pester result XML files
 ###############################################################################
@@ -134,7 +133,7 @@ try {
     Write-Host "Creating local backup of test results in $backupDir"
     Get-ChildItem $Env:HCIBoxLogsDir -Filter *.xml | ForEach-Object {
         Copy-Item -Path $_.FullName -Destination "$backupDir\$($_.Name)" -Force
-        Write-Host "Backed up $($_.Name) to $backupDir" -ForegroundColor Cyan
+        Write-Host "Backed up $($_.Name) to $backupDir"
     }
     
     Write-Host "All test results safely backed up to: $backupDir"
@@ -148,18 +147,36 @@ try {
         
         try {
             # Get storage account key
-            $storageKeys = Get-AzStorageAccountKey -ResourceGroupName $Env:resourceGroup -Name $StorageAccount.StorageAccountName
+            $storageKeys = Get-AzStorageAccountKey -ResourceGroupName $Env:resourceGroup -Name $StorageAccount.StorageAccountName -ErrorAction Stop
             if ($null -eq $storageKeys -or $storageKeys.Count -eq 0) {
-                Write-Warning "Unable to retrieve keys for storage account $($StorageAccount.StorageAccountName) - trying next account"
+                Write-Host "Unable to retrieve keys for storage account $($StorageAccount.StorageAccountName) - trying next account" -ForegroundColor Yellow
                 continue
             }
             $StorageAccountKey = $storageKeys[0].Value
+            Write-Host "   Retrieved storage keys successfully"
             
             # Create context using key
             $ctx = New-AzStorageContext -StorageAccountName $StorageAccount.StorageAccountName -StorageAccountKey $StorageAccountKey
             
-            # Create container if it doesn't exist
-            New-AzStorageContainer -Name "testresults" -Context $ctx -Permission Off -ErrorAction SilentlyContinue
+            # Check/Create container - suppress verbose output
+            $ErrorActionPreference = 'SilentlyContinue'
+            $container = Get-AzStorageContainer -Name "testresults" -Context $ctx -ErrorAction SilentlyContinue
+            $ErrorActionPreference = 'Continue'
+            
+            if ($null -eq $container) {
+                Write-Host "   Creating new 'testresults' container..."
+                $ErrorActionPreference = 'SilentlyContinue'
+                $container = New-AzStorageContainer -Name "testresults" -Context $ctx -Permission Off -ErrorAction SilentlyContinue
+                $ErrorActionPreference = 'Continue'
+                
+                if ($null -eq $container) {
+                    Write-Host "   Unable to create container in storage account $($StorageAccount.StorageAccountName) - trying next account" -ForegroundColor Yellow
+                    continue
+                }
+            }
+            
+            # Display container info
+            $container | Select-Object Name, PublicAccess, LastModified, IsDeleted, VersionId | Format-Table
             
             # Upload files
             $filesUploaded = 0
@@ -171,14 +188,19 @@ try {
                 
                 Write-Host "Uploading file $blobname to storage account $($StorageAccount.StorageAccountName)..."
                 
-                try {
-                    $null = Set-AzStorageBlobContent -File $localFile -Container "testresults" -Blob $blobname -Context $ctx -Force -ErrorAction Stop
+                # Use error handling pattern that suppresses terminating errors
+                $ErrorActionPreference = 'SilentlyContinue'
+                $error.Clear()
+                $result = Set-AzStorageBlobContent -File $localFile -Container "testresults" -Blob $blobname -Context $ctx -Force
+                $ErrorActionPreference = 'Continue'
+                
+                if ($error.Count -gt 0) {
+                    # Simpler error reporting - just show a one-line message
+                    Write-Host "   Upload failed: $($error[0].Exception.Message)" -ForegroundColor Yellow
+                    $filesWithErrors++
+                } else {
                     Write-Host "Successfully uploaded $blobname to $($StorageAccount.StorageAccountName)" -ForegroundColor Green
                     $filesUploaded++
-                }
-                catch {
-                    Write-Warning "Upload failed for ${blobname} to $($StorageAccount.StorageAccountName): $($_.Exception.Message)"
-                    $filesWithErrors++
                 }
             }
             
@@ -197,7 +219,7 @@ try {
             
         }
         catch {
-            Write-Warning "Error with storage account $($StorageAccount.StorageAccountName): $($_.Exception.Message)"
+            Write-Host "Error with storage account $($StorageAccount.StorageAccountName): $($_.Exception.Message)" -ForegroundColor Yellow
             Write-Host "Trying next storage account..." -ForegroundColor Yellow
         }
     }
