@@ -102,6 +102,7 @@ $config.Output.CIFormat = "AzureDevops"
 $config.Run.Path  = "$Env:HCIBoxTestsDir\hci.tests.ps1"
 Invoke-Pester -Configuration $config
 
+
 ###############################################################################
 # (D) Connect to Azure, create a container, and upload the Pester result XML files
 ###############################################################################
@@ -113,81 +114,109 @@ try {
     $spncredential = New-Object System.Management.Automation.PSCredential($Env:spnClientId, $spnpassword)
     $null = Connect-AzAccount -ServicePrincipal -Credential $spncredential -Tenant $Env:spnTenantId -Subscription $Env:subscriptionId -Scope Process
 
-    # Retrieve the resource group and storage account
+    # Retrieve the resource group and storage accounts
     $resourceGroup = Get-AzResourceGroup -Name $Env:resourceGroup
     $StorageAccounts = Get-AzStorageAccount -ResourceGroupName $Env:resourceGroup
-    $StorageAccount = $StorageAccounts | Select-Object -First 1
-
-    Write-Host "Using storage account: $($StorageAccount.StorageAccountName)"
-
-    # Explicitly get and use storage account key
-    Write-Host "Getting storage account keys..."
-    $storageKeys = Get-AzStorageAccountKey -ResourceGroupName $Env:resourceGroup -Name $StorageAccount.StorageAccountName
     
-    if ($null -eq $storageKeys -or $storageKeys.Count -eq 0) {
-        throw "Unable to retrieve storage account keys"
+    if ($null -eq $StorageAccounts -or $StorageAccounts.Count -eq 0) {
+        throw "No storage accounts found in resource group $($Env:resourceGroup)"
     }
     
-    $StorageAccountKey = $storageKeys[0].Value
-    Write-Host "Retrieved storage key successfully"
-    
-    # Create storage context with key
-    $ctx = New-AzStorageContext -StorageAccountName $StorageAccount.StorageAccountName -StorageAccountKey $StorageAccountKey
-    
-    # Create testresults container if it doesn't exist
-    Write-Host "Creating testresults container (if it doesn't exist)..."
-    New-AzStorageContainer -Name "testresults" -Context $ctx -Permission Off -ErrorAction SilentlyContinue
-    Write-Host "Container creation attempted"
+    Write-Host "Found $($StorageAccounts.Count) storage account(s) in resource group"
 
-    # Upload files
-    Write-Host "Uploading Pester result XML files from $Env:HCIBoxLogsDir to testresults container..."
-    $filesUploaded = 0
-    $filesWithErrors = 0
-
-    Get-ChildItem $Env:HCIBoxLogsDir -Filter *.xml | ForEach-Object {
-        $blobname = $_.Name
-        $localFile = $_.FullName
-        
-        Write-Host "Uploading file $blobname (from $localFile)"
-        
-        try {
-            # Use storage account key for upload
-            $null = Set-AzStorageBlobContent -File $localFile -Container "testresults" -Blob $blobname -Context $ctx -Force -ErrorAction Stop
-            Write-Host "Successfully uploaded $blobname" -ForegroundColor Green
-            $filesUploaded++
-        }
-        catch {
-            # Fix: properly escape the variable in the string with curly braces
-            Write-Warning "Upload failed for ${blobname}: $($_.Exception.Message)"
-            $filesWithErrors++
-            
-            # Always save a local backup
-            $backupDir = "C:\Windows\Temp\TestResults"
-            if (-not (Test-Path $backupDir)) {
-                New-Item -ItemType Directory -Path $backupDir -Force | Out-Null
-            }
-            Copy-Item -Path $localFile -Destination "$backupDir\$blobname" -Force
-            Write-Host "Saved copy to $backupDir\$blobname as fallback" -ForegroundColor Yellow
-        }
-    }
-
-    Write-Host "Upload summary: $filesUploaded files uploaded successfully, $filesWithErrors files with errors"
-}
-catch {
-    Write-Error "Error during storage operations: $($_.Exception.Message)"
-    Write-Host "Saving all test results locally as fallback..." -ForegroundColor Yellow
-    
-    # Ensure we have a backup directory
+    # Fallback approach - first save everything locally so we don't lose data
     $backupDir = "C:\Windows\Temp\TestResults"
     if (-not (Test-Path $backupDir)) {
         New-Item -ItemType Directory -Path $backupDir -Force | Out-Null
     }
     
-    # Copy all XML files to backup location
+    # Backup files first - ALWAYS do this regardless of upload success
+    Write-Host "Creating local backup of test results in $backupDir"
     Get-ChildItem $Env:HCIBoxLogsDir -Filter *.xml | ForEach-Object {
         Copy-Item -Path $_.FullName -Destination "$backupDir\$($_.Name)" -Force
-        Write-Host "Saved $($_.Name) to $backupDir" -ForegroundColor Yellow
+        Write-Host "Backed up $($_.Name) to $backupDir" -ForegroundColor Cyan
     }
+    
+    Write-Host "All test results safely backed up to: $backupDir"
+    
+    # Try each storage account in the resource group
+    $overallSuccess = $false
+    $totalFilesUploaded = 0
+    
+    foreach ($StorageAccount in $StorageAccounts) {
+        Write-Host "Trying storage account: $($StorageAccount.StorageAccountName)" -ForegroundColor Cyan
+        
+        try {
+            # Get storage account key
+            $storageKeys = Get-AzStorageAccountKey -ResourceGroupName $Env:resourceGroup -Name $StorageAccount.StorageAccountName
+            if ($null -eq $storageKeys -or $storageKeys.Count -eq 0) {
+                Write-Warning "Unable to retrieve keys for storage account $($StorageAccount.StorageAccountName) - trying next account"
+                continue
+            }
+            $StorageAccountKey = $storageKeys[0].Value
+            
+            # Create context using key
+            $ctx = New-AzStorageContext -StorageAccountName $StorageAccount.StorageAccountName -StorageAccountKey $StorageAccountKey
+            
+            # Create container if it doesn't exist
+            New-AzStorageContainer -Name "testresults" -Context $ctx -Permission Off -ErrorAction SilentlyContinue
+            
+            # Upload files
+            $filesUploaded = 0
+            $filesWithErrors = 0
+            
+            Get-ChildItem $Env:HCIBoxLogsDir -Filter *.xml | ForEach-Object {
+                $blobname = $_.Name
+                $localFile = $_.FullName
+                
+                Write-Host "Uploading file $blobname to storage account $($StorageAccount.StorageAccountName)..."
+                
+                try {
+                    $null = Set-AzStorageBlobContent -File $localFile -Container "testresults" -Blob $blobname -Context $ctx -Force -ErrorAction Stop
+                    Write-Host "Successfully uploaded $blobname to $($StorageAccount.StorageAccountName)" -ForegroundColor Green
+                    $filesUploaded++
+                }
+                catch {
+                    Write-Warning "Upload failed for ${blobname} to $($StorageAccount.StorageAccountName): $($_.Exception.Message)"
+                    $filesWithErrors++
+                }
+            }
+            
+            Write-Host "Upload summary for $($StorageAccount.StorageAccountName): $filesUploaded files uploaded successfully, $filesWithErrors files with errors"
+            
+            # If all files uploaded successfully to this storage account, we can break the loop
+            if ($filesUploaded -eq (Get-ChildItem $Env:HCIBoxLogsDir -Filter *.xml).Count) {
+                Write-Host "All files successfully uploaded to storage account $($StorageAccount.StorageAccountName)" -ForegroundColor Green
+                $overallSuccess = $true
+                $totalFilesUploaded = $filesUploaded
+                break
+            }
+            
+            # Otherwise, add to our running total and try the next storage account
+            $totalFilesUploaded += $filesUploaded
+            
+        }
+        catch {
+            Write-Warning "Error with storage account $($StorageAccount.StorageAccountName): $($_.Exception.Message)"
+            Write-Host "Trying next storage account..." -ForegroundColor Yellow
+        }
+    }
+    
+    # Provide a clear summary status
+    if ($overallSuccess) {
+        Write-Host "SUCCESS: All files were uploaded to Azure Storage account $($StorageAccount.StorageAccountName)." -ForegroundColor Green
+    }
+    elseif ($totalFilesUploaded -gt 0) {
+        Write-Host "PARTIAL SUCCESS: $totalFilesUploaded files were uploaded to Azure Storage." -ForegroundColor Yellow
+    }
+    else {
+        Write-Host "NOTE: No files were uploaded to Azure Storage. Using local backup only." -ForegroundColor Yellow
+        Write-Host "Test results are available at: $backupDir" -ForegroundColor Yellow
+    }
+}
+catch {
+    Write-Error "Error during storage operations: $($_.Exception.Message)"
+    Write-Host "All test results are available locally at: C:\Windows\Temp\TestResults" -ForegroundColor Yellow
 }
 
 ###############################################################################
