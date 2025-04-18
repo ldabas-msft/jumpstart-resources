@@ -109,7 +109,7 @@ Write-Host "Connecting to Azure and preparing to upload results to Storage accou
 
 try {
     # Connect to Azure using Service Principal
-    $spnpassword  = ConvertTo-SecureString $Env:spnClientSecret -AsPlainText -Force
+    $spnpassword = ConvertTo-SecureString $Env:spnClientSecret -AsPlainText -Force
     $spncredential = New-Object System.Management.Automation.PSCredential($Env:spnClientId, $spnpassword)
     $null = Connect-AzAccount -ServicePrincipal -Credential $spncredential -Tenant $Env:spnTenantId -Subscription $Env:subscriptionId -Scope Process
 
@@ -120,90 +120,67 @@ try {
 
     Write-Host "Using storage account: $($StorageAccount.StorageAccountName)"
 
-    # Assign proper RBAC role to the service principal
-    Write-Host "Assigning Storage Blob Data Contributor role to service principal"
-    $roleAssignment = New-AzRoleAssignment -ObjectId $Env:spnClientId `
-                      -RoleDefinitionName "Storage Blob Data Contributor" `
-                      -Scope $StorageAccount.Id `
-                      -ErrorAction SilentlyContinue
-
-    Write-Host "Waiting 15 seconds for role assignment to propagate..."
-    Start-Sleep -Seconds 15
-
-    # Create context for storage operations - try both methods
-    $useAAD = $false
+    # Explicitly get and use storage account key
+    Write-Host "Getting storage account keys..."
+    $storageKeys = Get-AzStorageAccountKey -ResourceGroupName $Env:resourceGroup -Name $StorageAccount.StorageAccountName
     
+    if ($null -eq $storageKeys -or $storageKeys.Count -eq 0) {
+        throw "Unable to retrieve storage account keys"
+    }
+    
+    $StorageAccountKey = $storageKeys[0].Value
+    Write-Host "Retrieved storage key successfully"
+    
+    # Create storage context with key
+    $ctx = New-AzStorageContext -StorageAccountName $StorageAccount.StorageAccountName -StorageAccountKey $StorageAccountKey
+    
+    # Test context by listing containers - fail fast if there's an issue
     try {
-        Write-Host "Attempting to use Azure AD authentication..."
-        $ctx = New-AzStorageContext -StorageAccountName $StorageAccount.StorageAccountName -UseConnectedAccount
-        
-        # Test access by trying to list containers
-        $null = Get-AzStorageContainer -Context $ctx -ErrorAction Stop
-        Write-Host "Azure AD authentication successful"
-        $useAAD = $true
+        Write-Host "Testing storage context by listing containers..."
+        $containers = Get-AzStorageContainer -Context $ctx -ErrorAction Stop
+        Write-Host "Storage context test successful. Found $($containers.Count) containers."
     }
     catch {
-        Write-Host "Azure AD authentication failed or not yet propagated: $_"
-        Write-Host "Falling back to storage account key authentication..."
-        
-        # Get the storage account key and create context
-        $StorageAccountKey = (Get-AzStorageAccountKey -ResourceGroupName $Env:resourceGroup -Name $StorageAccount.StorageAccountName)[0].Value
-        $ctx = New-AzStorageContext -StorageAccountName $StorageAccount.StorageAccountName -StorageAccountKey $StorageAccountKey
+        throw "Storage context is invalid: $_"
     }
 
-    # Create or confirm the testresults container
-    $null = New-AzStorageContainer -Name testresults -Context $ctx -Permission Off -ErrorAction SilentlyContinue
+    # Create testresults container if it doesn't exist
+    if (-not ($containers | Where-Object { $_.Name -eq "testresults" })) {
+        Write-Host "Creating testresults container..."
+        $null = New-AzStorageContainer -Name "testresults" -Context $ctx -Permission Off
+        Write-Host "Container created successfully"
+    }
+    else {
+        Write-Host "Container 'testresults' already exists"
+    }
 
+    # Upload files
     Write-Host "Uploading Pester result XML files from $Env:HCIBoxLogsDir to testresults container..."
-
     $filesUploaded = 0
     $filesWithErrors = 0
 
     Get-ChildItem $Env:HCIBoxLogsDir -Filter *.xml | ForEach-Object {
         $blobname = $_.Name
-        Write-Host "Uploading file $($_.Name) to blob $blobname"
+        $localFile = $_.FullName
         
-        $uploadSuccess = $false
+        Write-Host "Uploading file $blobname (from $localFile)"
         
-        # First attempt - with current context
         try {
-            $null = Set-AzStorageBlobContent -File $_.FullName -Container testresults -Blob $blobname -Context $ctx -Force -ErrorAction Stop
+            # Use storage account key for upload
+            $null = Set-AzStorageBlobContent -File $localFile -Container "testresults" -Blob $blobname -Context $ctx -Force -ErrorAction Stop
             Write-Host "Successfully uploaded $blobname" -ForegroundColor Green
             $filesUploaded++
-            $uploadSuccess = $true
         }
         catch {
-            Write-Warning "First upload attempt failed: $_"
+            Write-Warning "Upload failed for $blobname: $_"
+            $filesWithErrors++
             
-            # Second attempt - if using AAD, try with key instead
-            if ($useAAD) {
-                try {
-                    Write-Host "Retrying with storage account key..."
-                    $StorageAccountKey = (Get-AzStorageAccountKey -ResourceGroupName $Env:resourceGroup -Name $StorageAccount.StorageAccountName)[0].Value
-                    $keyCtx = New-AzStorageContext -StorageAccountName $StorageAccount.StorageAccountName -StorageAccountKey $StorageAccountKey
-                    
-                    $null = Set-AzStorageBlobContent -File $_.FullName -Container testresults -Blob $blobname -Context $keyCtx -Force -ErrorAction Stop
-                    Write-Host "Successfully uploaded $blobname using storage key" -ForegroundColor Green
-                    $filesUploaded++
-                    $uploadSuccess = $true
-                }
-                catch {
-                    Write-Error "Final upload attempt failed: $_"
-                    $filesWithErrors++
-                }
-            }
-            else {
-                $filesWithErrors++
-            }
-        }
-        
-        # If all uploads failed, save locally as backup
-        if (-not $uploadSuccess) {
+            # Always save a local backup
             $backupDir = "C:\Windows\Temp\TestResults"
             if (-not (Test-Path $backupDir)) {
                 New-Item -ItemType Directory -Path $backupDir -Force | Out-Null
             }
-            Copy-Item -Path $_.FullName -Destination "$backupDir\$blobname" -Force
+            Copy-Item -Path $localFile -Destination "$backupDir\$blobname" -Force
             Write-Host "Saved copy to $backupDir\$blobname as fallback" -ForegroundColor Yellow
         }
     }
@@ -212,7 +189,19 @@ try {
 }
 catch {
     Write-Error "Error during storage operations: $_"
-    # Continue execution to ensure the script doesn't fail completely
+    Write-Host "Saving all test results locally as fallback..." -ForegroundColor Yellow
+    
+    # Ensure we have a backup directory
+    $backupDir = "C:\Windows\Temp\TestResults"
+    if (-not (Test-Path $backupDir)) {
+        New-Item -ItemType Directory -Path $backupDir -Force | Out-Null
+    }
+    
+    # Copy all XML files to backup location
+    Get-ChildItem $Env:HCIBoxLogsDir -Filter *.xml | ForEach-Object {
+        Copy-Item -Path $_.FullName -Destination "$backupDir\$($_.Name)" -Force
+        Write-Host "Saved $($_.Name) to $backupDir" -ForegroundColor Yellow
+    }
 }
 
 ###############################################################################
