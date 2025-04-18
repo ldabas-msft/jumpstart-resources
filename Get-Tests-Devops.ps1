@@ -141,7 +141,7 @@ try {
         Write-Host "Storage context test successful. Found $($containers.Count) containers."
     }
     catch {
-        throw "Storage context is invalid: $_"
+        throw "Storage context is invalid: $($_.Exception.Message)"
     }
 
     # Create testresults container if it doesn't exist
@@ -172,7 +172,8 @@ try {
             $filesUploaded++
         }
         catch {
-            Write-Warning "Upload failed for $blobname: $_"
+            # Fix: properly escape the variable in the string with curly braces
+            Write-Warning "Upload failed for ${blobname}: $($_.Exception.Message)"
             $filesWithErrors++
             
             # Always save a local backup
@@ -188,7 +189,7 @@ try {
     Write-Host "Upload summary: $filesUploaded files uploaded successfully, $filesWithErrors files with errors"
 }
 catch {
-    Write-Error "Error during storage operations: $_"
+    Write-Error "Error during storage operations: $($_.Exception.Message)"
     Write-Host "Saving all test results locally as fallback..." -ForegroundColor Yellow
     
     # Ensure we have a backup directory
