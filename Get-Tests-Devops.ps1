@@ -1,225 +1,159 @@
 param(
+    [Parameter(Mandatory=$true)]
+    [string]$ResourceGroupName,
+    [Parameter(Mandatory=$true)]
     [string]$SubscriptionId,
+    [Parameter(Mandatory=$true)]
     [string]$TenantId,
+    [Parameter(Mandatory=$true)]
     [string]$ClientId,
-    [string]$ClientSecret,
-    [string]$ResourceGroup,
-    [string]$Location
+    [Parameter(Mandatory=$true)]
+    [string]$ClientSecret
 )
 
-###############################################################################
-# Assign these values to environment variables so tests referencing $env variables
-# will see them:
-###############################################################################
-$Env:subscriptionId = $SubscriptionId
-$Env:spnTenantId    = $TenantId
-$Env:spnClientId    = $ClientId
-$Env:spnClientSecret= $ClientSecret
-$Env:resourceGroup  = $ResourceGroup
-$Env:azureLocation  = $Location
-[System.Environment]::SetEnvironmentVariable('tenantId', $TenantId, 'Process')
+Write-Host "Starting VM Run Command to run tests on HCIBox-Client in resource group $ResourceGroupName"
 
-###############################################################################
-# Start transcript, record script run
-###############################################################################
-Start-Transcript -Path "$env:SystemDrive\HCIBox\logs\Get-HCITestResult.log" -Force
-
-Write-Host "Get-HCITestResults.ps1 started in $(hostname.exe) as user $(whoami.exe) at $(Get-Date)"
-Write-Host "SubscriptionId: $SubscriptionId"
-Write-Host "TenantId:       $TenantId"
-Write-Host "ResourceGroup:  $ResourceGroup"
-Write-Host "Location:       $Location"
-
-###############################################################################
-# (A) Wait for previous transcript end in HCIBoxLogonScript.log (Optional)
-###############################################################################
-$timeout    = New-TimeSpan -Minutes 180
-$endTime    = (Get-Date).Add($timeout)
-$logFilePath= "$env:SystemDrive\HCIBox\Logs\HCIBoxLogonScript.log"
-
-Write-Host "Waiting for PowerShell transcript end in $logFilePath"
-
-do {
-    if (Test-Path $logFilePath) {
-        Write-Host "Log file $logFilePath exists"
-        $content = Get-Content -Path $logFilePath -Tail 5
-        if ($content -like "*PowerShell transcript end*") {
-            Write-Host "PowerShell transcript end detected in $logFilePath at $(Get-Date)"
-            break
-        }
-        else {
-            Write-Host "PowerShell transcript end not detected - waiting 60s"
-        }
-    }
-    else {
-        Write-Host "Log file $logFilePath does not yet exist - waiting 60s"
-    }
-    if ((Get-Date) -ge $endTime) {
-       throw "Timeout reached. PowerShell transcript end not found."
-    }
-    Start-Sleep -Seconds 60
-} while ((Get-Date) -lt $endTime)
-
-
-###############################################################################
-# (B) (Optional) Sign in to Azure if needed
-###############################################################################
-Write-Host "Authenticating to Azure..."
-$spnpassword = ConvertTo-SecureString $env:spnClientSecret -AsPlainText -Force
-$spncredential = New-Object System.Management.Automation.PSCredential ($env:spnClientId, $spnpassword)
+# Fix authentication - create a credential object
 try {
-    $null = Connect-AzAccount -ServicePrincipal -Credential $spncredential -Tenant $env:spnTenantId -Subscription $env:subscriptionId -Scope Process
-    Write-Host "Successfully authenticated to Azure"
+    $securePassword = ConvertTo-SecureString $ClientSecret -AsPlainText -Force
+    $credential = New-Object System.Management.Automation.PSCredential($ClientId, $securePassword)
+    
+    Connect-AzAccount -ServicePrincipal -TenantId $TenantId -Credential $credential -Subscription $SubscriptionId -ErrorAction Stop
+    Write-Host "Successfully authenticated to Azure" -ForegroundColor Green
 } catch {
     Write-Error "Failed to authenticate to Azure: $_"
     throw
 }
 
-###############################################################################
-# (C) Run Pester Tests
-###############################################################################
-Write-Host "Running Pester tests for HCIBox"
-
-$Env:HCIBoxDir      = "$env:SystemDrive\HCIBox"
-$Env:HCIBoxLogsDir  = "$Env:HCIBoxDir\Logs"
-$Env:HCIBoxTestsDir = "$Env:HCIBoxDir\Tests"
-
-Import-Module -Name Pester -Force
-
-# Example: run common.tests.ps1
-$config = [PesterConfiguration]::Default
-$config.TestResult.Enabled = $true
-$config.TestResult.OutputPath = "$Env:HCIBoxLogsDir\common.tests.xml"
-$config.Output.CIFormat = "AzureDevops"
-$config.Run.Path  = "$Env:HCIBoxTestsDir\common.tests.ps1"
-Invoke-Pester -Configuration $config
-
-# Run hci.tests.ps1
-$config = [PesterConfiguration]::Default
-$config.TestResult.Enabled = $true
-$config.TestResult.OutputPath = "$Env:HCIBoxLogsDir\hci.tests.xml"
-$config.Output.CIFormat = "AzureDevops"
-$config.Run.Path  = "$Env:HCIBoxTestsDir\hci.tests.ps1"
-Invoke-Pester -Configuration $config
-
-###############################################################################
-# (D) Connect to Azure, create a container, and upload the Pester result XML files
-###############################################################################
-Write-Host "Connecting to Azure and preparing to upload results to Storage account..."
+$vmName = "HCIBox-Client"
 
 try {
-    # Connect to Azure using Service Principal
-    $spnpassword = ConvertTo-SecureString $Env:spnClientSecret -AsPlainText -Force
-    $spncredential = New-Object System.Management.Automation.PSCredential($Env:spnClientId, $spnpassword)
-    $null = Connect-AzAccount -ServicePrincipal -Credential $spncredential -Tenant $Env:spnTenantId -Subscription $Env:subscriptionId -Scope Process
+    $VM = Get-AzVM -ResourceGroupName $ResourceGroupName -Name $vmName -ErrorAction Stop
+    $Location = $VM.Location
+    Write-Host "VM located in: $Location" -ForegroundColor Green
+} catch {
+    Write-Error "Failed to get VM details: $_"
+    throw
+}
 
-    # Retrieve the resource group and storage accounts
-    $resourceGroup = Get-AzResourceGroup -Name $Env:resourceGroup
-    $StorageAccounts = Get-AzStorageAccount -ResourceGroupName $Env:resourceGroup
-    
-    if ($null -eq $StorageAccounts -or $StorageAccounts.Count -eq 0) {
-        throw "No storage accounts found in resource group $($Env:resourceGroup)"
-    }
-    
-    Write-Host "Found $($StorageAccounts.Count) storage account(s) in resource group"
+Write-Host "Executing Run Command on VM: $vmName" -ForegroundColor Green
 
-    # Fallback approach - first save everything locally so we don't lose data
-    $backupDir = "C:\Windows\Temp\TestResults"
-    if (-not (Test-Path $backupDir)) {
-        New-Item -ItemType Directory -Path $backupDir -Force | Out-Null
-    }
+# Create a unique log file path for this run
+$logFileName = "HCIBox_Diagnostic_$(Get-Date -Format 'yyyyMMdd_HHmmss').log"
+$remoteTempPath = "C:\Windows\Temp\$logFileName"
+
+# Modified script that properly logs to the file
+$diagScript = @"
+Write-Host "=== STARTING DIAGNOSTIC SCRIPT ==="
+
+# Set up logging to file
+Start-Transcript -Path '$remoteTempPath' -Force
+
+try {
+    Write-Host "Diagnostic script started at $(Get-Date)"
+    Write-Host "Parameters: SubscriptionId=$SubscriptionId, TenantId=$TenantId, ClientId=$ClientId, ClientSecret=[REDACTED], ResourceGroup=$ResourceGroupName, Location=$Location"
     
-    # Backup files first - ALWAYS do this regardless of upload success
-    Write-Host "Creating local backup of test results in $backupDir"
-    Get-ChildItem $Env:HCIBoxLogsDir -Filter *.xml | ForEach-Object {
-        Copy-Item -Path $_.FullName -Destination "$backupDir\$($_.Name)" -Force
-        Write-Host "Backed up $($_.Name) to $backupDir" -ForegroundColor Cyan
-    }
+    # Download the test script
+    Write-Host "Downloading test script..."
+    `$webClient = New-Object Net.WebClient
+    `$scriptUrl = 'https://raw.githubusercontent.com/ldabas-msft/jumpstart-resources/refs/heads/main/Get-Tests-Devops.ps1'
+    Write-Host "Downloading from: `$scriptUrl"
+    `$scriptContent = `$webClient.DownloadString(`$scriptUrl)
+    Write-Host "Script downloaded, saving to temporary file..."
     
-    Write-Host "All test results safely backed up to: $backupDir"
+    # Save to temporary file
+    `$tempScriptPath = "C:\\Windows\\Temp\\Get-Tests-Devops.ps1"
+    Set-Content -Path `$tempScriptPath -Value `$scriptContent
     
-    # Try each storage account in the resource group
-    $overallSuccess = $false
-    $totalFilesUploaded = 0
+    # Execute with parameters explicitly specified
+    Write-Host "Executing script with parameters..."
+    & `$tempScriptPath -SubscriptionId '$SubscriptionId' -TenantId '$TenantId' -ClientId '$ClientId' -ClientSecret '$ClientSecret' -ResourceGroup '$ResourceGroupName' -Location '$Location'
     
-    foreach ($StorageAccount in $StorageAccounts) {
-        Write-Host "Trying storage account: $($StorageAccount.StorageAccountName)" -ForegroundColor Cyan
-        
-        try {
-            # Get storage account key
-            $storageKeys = Get-AzStorageAccountKey -ResourceGroupName $Env:resourceGroup -Name $StorageAccount.StorageAccountName
-            if ($null -eq $storageKeys -or $storageKeys.Count -eq 0) {
-                Write-Warning "Unable to retrieve keys for storage account $($StorageAccount.StorageAccountName) - trying next account"
-                continue
-            }
-            $StorageAccountKey = $storageKeys[0].Value
-            
-            # Create context using key
-            $ctx = New-AzStorageContext -StorageAccountName $StorageAccount.StorageAccountName -StorageAccountKey $StorageAccountKey
-            
-            # Create container if it doesn't exist
-            New-AzStorageContainer -Name "testresults" -Context $ctx -Permission Off -ErrorAction SilentlyContinue
-            
-            # Upload files
-            $filesUploaded = 0
-            $filesWithErrors = 0
-            
-            Get-ChildItem $Env:HCIBoxLogsDir -Filter *.xml | ForEach-Object {
-                $blobname = $_.Name
-                $localFile = $_.FullName
-                
-                Write-Host "Uploading file $blobname to storage account $($StorageAccount.StorageAccountName)..."
-                
-                try {
-                    $null = Set-AzStorageBlobContent -File $localFile -Container "testresults" -Blob $blobname -Context $ctx -Force -ErrorAction Stop
-                    Write-Host "Successfully uploaded $blobname to $($StorageAccount.StorageAccountName)" -ForegroundColor Green
-                    $filesUploaded++
-                }
-                catch {
-                    Write-Warning "Upload failed for ${blobname} to $($StorageAccount.StorageAccountName): $($_.Exception.Message)"
-                    $filesWithErrors++
-                }
-            }
-            
-            Write-Host "Upload summary for $($StorageAccount.StorageAccountName): $filesUploaded files uploaded successfully, $filesWithErrors files with errors"
-            
-            # If all files uploaded successfully to this storage account, we can break the loop
-            if ($filesUploaded -eq (Get-ChildItem $Env:HCIBoxLogsDir -Filter *.xml).Count) {
-                Write-Host "All files successfully uploaded to storage account $($StorageAccount.StorageAccountName)" -ForegroundColor Green
-                $overallSuccess = $true
-                $totalFilesUploaded = $filesUploaded
-                break
-            }
-            
-            # Otherwise, add to our running total and try the next storage account
-            $totalFilesUploaded += $filesUploaded
-            
-        }
-        catch {
-            Write-Warning "Error with storage account $($StorageAccount.StorageAccountName): $($_.Exception.Message)"
-            Write-Host "Trying next storage account..." -ForegroundColor Yellow
-        }
-    }
-    
-    # Provide a clear summary status
-    if ($overallSuccess) {
-        Write-Host "SUCCESS: All files were uploaded to Azure Storage account $($StorageAccount.StorageAccountName)." -ForegroundColor Green
-    }
-    elseif ($totalFilesUploaded -gt 0) {
-        Write-Host "PARTIAL SUCCESS: $totalFilesUploaded files were uploaded to Azure Storage." -ForegroundColor Yellow
-    }
-    else {
-        Write-Host "NOTE: No files were uploaded to Azure Storage. Using local backup only." -ForegroundColor Yellow
-        Write-Host "Test results are available at: $backupDir" -ForegroundColor Yellow
+    if (`$?) {
+        Write-Host "Script execution completed successfully"
+    } else {
+        Write-Host "Script execution failed with exit code `$LASTEXITCODE"
     }
 }
 catch {
-    Write-Error "Error during storage operations: $($_.Exception.Message)"
-    Write-Host "All test results are available locally at: C:\Windows\Temp\TestResults" -ForegroundColor Yellow
+    Write-Host "Error during script execution: `$(`$_.Exception.Message)"
+    Write-Host "Error details: `$(`$_)"
 }
+finally {
+    Write-Host "Script execution finished at $(Get-Date)"
+    Stop-Transcript
+}
+"@
 
-###############################################################################
-# (E) Finish
-###############################################################################
-Write-Host "Get-HCITestResults.ps1 finished at $(Get-Date)"
-Stop-Transcript
+# Start the main command
+try {
+    Write-Host "Starting main diagnostic command..." -ForegroundColor Cyan
+    # Pass parameters with correct names
+    $mainJob = Invoke-AzVMRunCommand -ResourceGroupName $ResourceGroupName -VMName $vmName -CommandId 'RunPowerShellScript' -ScriptString $diagScript -AsJob
+
+    Write-Host "Main command started with job ID: $($mainJob.Id)" -ForegroundColor Green
+    Write-Host "Test script executing, please wait for completion..." -ForegroundColor Cyan
+
+    # Variables to track monitoring
+    $logMonitorStartTime = Get-Date
+    $maxWaitTime = New-TimeSpan -Minutes 30
+    $checkInterval = 10 # seconds
+    
+    # Monitor job until it completes
+    do {
+        Start-Sleep -Seconds $checkInterval
+        $elapsed = (Get-Date) - $logMonitorStartTime
+        $jobStatus = Get-Job -Id $mainJob.Id
+        
+        Write-Host "Status: $($jobStatus.State) [Elapsed: $([math]::Floor($elapsed.TotalMinutes))m $($elapsed.Seconds)s]" -ForegroundColor DarkGray
+    } while ($jobStatus.State -eq "Running" -and $elapsed -lt $maxWaitTime)
+
+    # Get the final result
+    $result = Receive-Job -Id $mainJob.Id
+    Remove-Job -Id $mainJob.Id -Force
+
+    # Display results
+    Write-Host "Run Command completed with status: $($jobStatus.State)" -ForegroundColor Green
+
+    if ($jobStatus.State -eq "Completed") {
+        Write-Host "Command execution succeeded!" -ForegroundColor Green
+        
+        # Now that the main job is complete, we can safely get logs
+        Write-Host "Retrieving execution logs..." -ForegroundColor Cyan
+        $getLogsScript = "if (Test-Path '$remoteTempPath') { Get-Content '$remoteTempPath' }"
+        
+        $logsResult = Invoke-AzVMRunCommand -ResourceGroupName $ResourceGroupName -VMName $vmName -CommandId 'RunPowerShellScript' -ScriptString $getLogsScript
+        
+        if ($logsResult.Value -and $logsResult.Value[0].Message) {
+            Write-Host "== Full Execution Log ==" -ForegroundColor Green
+            $logs = $logsResult.Value[0].Message -split "`n"
+            foreach ($line in $logs) {
+                if ($line.Trim()) {
+                    Write-Host $line -ForegroundColor Cyan
+                }
+            }
+        } else {
+            Write-Host "No logs found at $remoteTempPath" -ForegroundColor Yellow
+        }
+    } else {
+        Write-Host "Command execution failed!" -ForegroundColor Red
+        Write-Host "Error details:" -ForegroundColor Yellow
+        if ($result.Error) {
+            $result.Error
+        }
+        
+        # Try to get any error output from the log file
+        $getLogsScript = "if (Test-Path '$remoteTempPath') { Get-Content '$remoteTempPath' }"
+        $logsResult = Invoke-AzVMRunCommand -ResourceGroupName $ResourceGroupName -VMName $vmName -CommandId 'RunPowerShellScript' -ScriptString $getLogsScript
+        
+        if ($logsResult.Value -and $logsResult.Value[0].Message) {
+            Write-Host "== Error Log ==" -ForegroundColor Red
+            Write-Host $logsResult.Value[0].Message -ForegroundColor White
+        }
+        
+        throw "VM Run Command did not complete successfully"
+    }
+} catch {
+    Write-Error "Error executing run command: $_"
+    throw "VM Run Command failed: $_"
+}
