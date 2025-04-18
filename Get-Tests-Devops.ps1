@@ -8,7 +8,10 @@ param(
     [Parameter(Mandatory=$true)]
     [string]$ClientId,
     [Parameter(Mandatory=$true)]
-    [string]$ClientSecret
+    [string]$ClientSecret,
+    [Parameter(Mandatory=$true)]
+    [string]$Location
+)
 )
 
 Write-Host "Starting VM Run Command to run tests on HCIBox-Client in resource group $ResourceGroupName"
