@@ -102,68 +102,42 @@ $config.Output.CIFormat = "AzureDevops"
 $config.Run.Path  = "$Env:HCIBoxTestsDir\hci.tests.ps1"
 Invoke-Pester -Configuration $config
 
-
 ###############################################################################
 # (D) Connect to Azure, create a container, and upload the Pester result XML files
 ###############################################################################
 Write-Host "Connecting to Azure and preparing to upload results to Storage account..."
 
 try {
-    # Connect to Azure using Service Principal - we're already connected from step (B), but connecting again with explicit scope
+    # Connect to Azure using Service Principal
     $spnpassword = ConvertTo-SecureString $Env:spnClientSecret -AsPlainText -Force
     $spncredential = New-Object System.Management.Automation.PSCredential($Env:spnClientId, $spnpassword)
     $null = Connect-AzAccount -ServicePrincipal -Credential $spncredential -Tenant $Env:spnTenantId -Subscription $Env:subscriptionId -Scope Process
 
-    # Get the storage account
-    $resourceGroup = $Env:resourceGroup
-    Write-Host "Getting storage account in resource group: $resourceGroup"
-    $StorageAccounts = Get-AzStorageAccount -ResourceGroupName $resourceGroup
-    
-    if ($null -eq $StorageAccounts -or $StorageAccounts.Count -eq 0) {
-        throw "No storage accounts found in resource group $resourceGroup"
-    }
-    
+    # Retrieve the resource group and storage account
+    $resourceGroup = Get-AzResourceGroup -Name $Env:resourceGroup
+    $StorageAccounts = Get-AzStorageAccount -ResourceGroupName $Env:resourceGroup
     $StorageAccount = $StorageAccounts | Select-Object -First 1
+
     Write-Host "Using storage account: $($StorageAccount.StorageAccountName)"
 
-        # Check if service principal has role assignments on the storage account
-    Write-Host "Checking service principal permissions for storage account access..."
+    # Explicitly get and use storage account key
+    Write-Host "Getting storage account keys..."
+    $storageKeys = Get-AzStorageAccountKey -ResourceGroupName $Env:resourceGroup -Name $StorageAccount.StorageAccountName
     
-    # Assign appropriate role if needed (requires Owner or User Access Administrator permission)
-    try {
-        $roleAssignment = Get-AzRoleAssignment -ObjectId $Env:spnClientId -Scope $StorageAccount.Id -ErrorAction SilentlyContinue
-        if ($null -eq $roleAssignment) {
-            Write-Host "Service principal does not have explicit role assignments on storage account. Attempting to assign Storage Blob Data Contributor role..."
-            $null = New-AzRoleAssignment -ObjectId $Env:spnClientId -RoleDefinitionName "Storage Blob Data Contributor" -Scope $StorageAccount.Id -ErrorAction SilentlyContinue
-            Write-Host "Role assignment attempted. Waiting 20 seconds for permissions to propagate..."
-            Start-Sleep -Seconds 20
-            Write-Host "Continuing after waiting for role assignment propagation"
-        } else {
-            Write-Host "Service principal has the following roles on storage account: $($roleAssignment.RoleDefinitionName -join ', ')"
-        }
-    } catch {
-        Write-Warning "Unable to check or assign roles: $($_.Exception.Message). Continuing with current permissions."
+    if ($null -eq $storageKeys -or $storageKeys.Count -eq 0) {
+        throw "Unable to retrieve storage account keys"
     }
     
-    # Use Azure AD-based authentication instead of storage keys
-    Write-Host "Using Azure AD authentication for blob operations..."
-    $ctx = New-AzStorageContext -StorageAccountName $StorageAccount.StorageAccountName -UseConnectedAccount
+    $StorageAccountKey = $storageKeys[0].Value
+    Write-Host "Retrieved storage key successfully"
     
-    # Create testresults container if it doesn't exist - with error handling
-    Write-Host "Checking if testresults container exists..."
-    try {
-        $container = Get-AzStorageContainer -Name "testresults" -Context $ctx -ErrorAction SilentlyContinue
-        if ($null -eq $container) {
-            Write-Host "Creating testresults container..."
-            $null = New-AzStorageContainer -Name "testresults" -Context $ctx -Permission Off
-            Write-Host "Container created successfully"
-        } else {
-            Write-Host "Container 'testresults' already exists"
-        }
-    } catch {
-        Write-Warning "Error accessing/creating container: $($_.Exception.Message)"
-        throw "Unable to access or create the storage container. Please ensure the service principal has appropriate permissions."
-    }
+    # Create storage context with key
+    $ctx = New-AzStorageContext -StorageAccountName $StorageAccount.StorageAccountName -StorageAccountKey $StorageAccountKey
+    
+    # Create testresults container if it doesn't exist
+    Write-Host "Creating testresults container (if it doesn't exist)..."
+    New-AzStorageContainer -Name "testresults" -Context $ctx -Permission Off -ErrorAction SilentlyContinue
+    Write-Host "Container creation attempted"
 
     # Upload files
     Write-Host "Uploading Pester result XML files from $Env:HCIBoxLogsDir to testresults container..."
@@ -177,12 +151,13 @@ try {
         Write-Host "Uploading file $blobname (from $localFile)"
         
         try {
-            # Use Azure AD authentication for upload
+            # Use storage account key for upload
             $null = Set-AzStorageBlobContent -File $localFile -Container "testresults" -Blob $blobname -Context $ctx -Force -ErrorAction Stop
             Write-Host "Successfully uploaded $blobname" -ForegroundColor Green
             $filesUploaded++
         }
         catch {
+            # Fix: properly escape the variable in the string with curly braces
             Write-Warning "Upload failed for ${blobname}: $($_.Exception.Message)"
             $filesWithErrors++
             
