@@ -22,9 +22,9 @@ $Env:azureLocation  = $Location
 ###############################################################################
 # Start transcript, record script run
 ###############################################################################
-Start-Transcript -Path "$env:SystemDrive\HCIBox\logs\Get-HCITestResult.log" -Force
+Start-Transcript -Path "$env:SystemDrive\HCIBox\logs\Get-LocalTestResult.log" -Force
 
-Write-Host "Get-HCITestResults.ps1 started in $(hostname.exe) as user $(whoami.exe) at $(Get-Date)"
+Write-Host "Get-LocalTestResults.ps1 started in $(hostname.exe) as user $(whoami.exe) at $(Get-Date)"
 Write-Host "SubscriptionId: $SubscriptionId"
 Write-Host "TenantId:       $TenantId"
 Write-Host "ResourceGroup:  $ResourceGroup"
@@ -35,7 +35,7 @@ Write-Host "Location:       $Location"
 ###############################################################################
 $timeout    = New-TimeSpan -Minutes 180
 $endTime    = (Get-Date).Add($timeout)
-$logFilePath= "$env:SystemDrive\HCIBox\Logs\HCIBoxLogonScript.log"
+$logFilePath= "$env:SystemDrive\LocalBox\Logs\LocalBoxLogonScript.log"
 
 Write-Host "Waiting for PowerShell transcript end in $logFilePath"
 
