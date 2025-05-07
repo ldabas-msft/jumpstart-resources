@@ -22,7 +22,7 @@ $Env:azureLocation  = $Location
 ###############################################################################
 # Start transcript, record script run
 ###############################################################################
-Start-Transcript -Path "$env:SystemDrive\HCIBox\logs\Get-LocalTestResult.log" -Force
+Start-Transcript -Path "$env:SystemDrive\LocalBox\logs\Get-LocalTestResult.log" -Force
 
 Write-Host "Get-LocalTestResults.ps1 started in $(hostname.exe) as user $(whoami.exe) at $(Get-Date)"
 Write-Host "SubscriptionId: $SubscriptionId"
@@ -78,9 +78,9 @@ try {
 ###############################################################################
 # (C) Run Pester Tests
 ###############################################################################
-Write-Host "Running Pester tests for HCIBox"
+Write-Host "Running Pester tests for LocalBox"
 
-$Env:HCIBoxDir      = "$env:SystemDrive\HCIBox"
+$Env:HCIBoxDir      = "$env:SystemDrive\LocalBox"
 $Env:HCIBoxLogsDir  = "$Env:HCIBoxDir\Logs"
 $Env:HCIBoxTestsDir = "$Env:HCIBoxDir\Tests"
 
