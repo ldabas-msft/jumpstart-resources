@@ -31,7 +31,7 @@ Write-Host "ResourceGroup:  $ResourceGroup"
 Write-Host "Location:       $Location"
 
 ###############################################################################
-# (A) Wait for previous transcript end in HCIBoxLogonScript.log (Optional)
+# (A) Wait for previous transcript end in LocalBoxLogonScript.log (Optional)
 ###############################################################################
 $timeout    = New-TimeSpan -Minutes 180
 $endTime    = (Get-Date).Add($timeout)
@@ -80,26 +80,26 @@ try {
 ###############################################################################
 Write-Host "Running Pester tests for LocalBox"
 
-$Env:HCIBoxDir      = "$env:SystemDrive\LocalBox"
-$Env:HCIBoxLogsDir  = "$Env:HCIBoxDir\Logs"
-$Env:HCIBoxTestsDir = "$Env:HCIBoxDir\Tests"
+$Env:LocalBoxDir      = "$env:SystemDrive\LocalBox"
+$Env:LocalBoxLogsDir  = "$Env:LocalBoxDir\Logs"
+$Env:LocalBoxTestsDir = "$Env:LocalBoxDir\Tests"
 
 Import-Module -Name Pester -Force
 
 # Example: run common.tests.ps1
 $config = [PesterConfiguration]::Default
 $config.TestResult.Enabled = $true
-$config.TestResult.OutputPath = "$Env:HCIBoxLogsDir\common.tests.xml"
+$config.TestResult.OutputPath = "$Env:LocalBoxLogsDir\common.tests.xml"
 $config.Output.CIFormat = "AzureDevops"
-$config.Run.Path  = "$Env:HCIBoxTestsDir\common.tests.ps1"
+$config.Run.Path  = "$Env:LocalBoxTestsDir\common.tests.ps1"
 Invoke-Pester -Configuration $config
 
-# Run hci.tests.ps1
+# Run azlocal.tests.ps1
 $config = [PesterConfiguration]::Default
 $config.TestResult.Enabled = $true
-$config.TestResult.OutputPath = "$Env:HCIBoxLogsDir\hci.tests.xml"
+$config.TestResult.OutputPath = "$Env:LocalBoxLogsDir\azlocal.tests.xml"
 $config.Output.CIFormat = "AzureDevops"
-$config.Run.Path  = "$Env:HCIBoxTestsDir\hci.tests.ps1"
+$config.Run.Path  = "$Env:LocalBoxTestsDir\azlocal.tests.ps1"
 Invoke-Pester -Configuration $config
 
 ###############################################################################
@@ -131,7 +131,7 @@ try {
     
     # Backup files first - ALWAYS do this regardless of upload success
     Write-Host "Creating local backup of test results in $backupDir"
-    Get-ChildItem $Env:HCIBoxLogsDir -Filter *.xml | ForEach-Object {
+    Get-ChildItem $Env:LocalBoxLogsDir -Filter *.xml | ForEach-Object {
         Copy-Item -Path $_.FullName -Destination "$backupDir\$($_.Name)" -Force
         Write-Host "Backed up $($_.Name) to $backupDir"
     }
@@ -182,7 +182,7 @@ try {
             $filesUploaded = 0
             $filesWithErrors = 0
             
-            Get-ChildItem $Env:HCIBoxLogsDir -Filter *.xml | ForEach-Object {
+            Get-ChildItem $Env:LocalBoxLogsDir -Filter *.xml | ForEach-Object {
                 $blobname = $_.Name
                 $localFile = $_.FullName
                 
@@ -207,7 +207,7 @@ try {
             Write-Host "Upload summary for $($StorageAccount.StorageAccountName): $filesUploaded files uploaded successfully, $filesWithErrors files with errors"
             
             # If all files uploaded successfully to this storage account, we can break the loop
-            if ($filesUploaded -eq (Get-ChildItem $Env:HCIBoxLogsDir -Filter *.xml).Count) {
+            if ($filesUploaded -eq (Get-ChildItem $Env:LocalBoxLogsDir -Filter *.xml).Count) {
                 Write-Host "All files successfully uploaded to storage account $($StorageAccount.StorageAccountName)" -ForegroundColor Green
                 $overallSuccess = $true
                 $totalFilesUploaded = $filesUploaded
@@ -244,5 +244,5 @@ catch {
 ###############################################################################
 # (E) Finish
 ###############################################################################
-Write-Host "Get-HCITestResults.ps1 finished at $(Get-Date)"
+Write-Host "Get-LocalTestResults.ps1 finished at $(Get-Date)"
 Stop-Transcript
